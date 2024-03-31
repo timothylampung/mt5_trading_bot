@@ -29,9 +29,6 @@ class MetatraderLifeCycle:
         self.timeframe = timeframe
         self.previous_bid = self.get_symbol_info().bid
         self.previous_ask = self.get_symbol_info().ask
-        self.PLOT_DATA = {
-            'signal_data': {}
-        }
 
     def on_signal(self):
         pass
@@ -56,7 +53,7 @@ class MetatraderLifeCycle:
                 self.previous_ask = current_ask_
                 self.on_manage_risk()
                 print('new tick {} {}'.format(self.symbol, self.timeframe))
-                return self.on_tick()
+                self.on_tick()
 
     def on_tick(self):
         bars = mt5.copy_rates_from_pos(self.symbol, self.timeframe, 0, 80)
@@ -64,54 +61,8 @@ class MetatraderLifeCycle:
         if bars is not None and len(bars) > 0:
             bars_frame = pd.DataFrame(bars)
 
-            position_prices = None
-            position_volumes = None
-
-            if positions is not None and len(positions) > 0:
-                position_prices = [position.price_open for position in positions]
-                position_volumes = [position.volume for position in positions]
-            if position_prices is not None:
-                position_prices = [0 if price is None else price for price in position_prices]
-                position_volumes = [0 if volume is None else volume for volume in position_volumes]
-
-            bars_frame = bars_frame.iloc[:40]
-
             # calling on signal
             signal_data = self.on_signal()
-
-            ask = self.get_symbol_info().ask
-            bid = self.get_symbol_info().bid
-            account_info = mt5.account_info()
-
-            self.PLOT_DATA = {
-                'sentiment': 'to be added soon',
-                'positions': {
-                    'time': bars_frame['time'].values.tolist(),
-                    'prices': position_prices,
-                    'sizes': position_volumes
-                },
-                'ohlc': {
-                    'time': bars_frame['time'].values.tolist(),
-                    'open': bars_frame['open'].values.tolist(),
-                    'close': bars_frame['close'].values.tolist(),
-                    'high': bars_frame['high'].values.tolist(),
-                    'low': bars_frame['low'].values.tolist(),
-                },
-                'account': {
-                    'balance': account_info.balance,
-                    'equity': account_info.equity,
-                    'gain': ((account_info.equity - account_info.balance) / account_info.balance) * 100
-                },
-                'chart_info': {
-                    'timeframe': self.timeframe,
-                    'symbol': self.symbol,
-                    'ask': ask,
-                    'bid': bid
-                },
-                'signal_data': signal_data
-            }
-
-            return self.PLOT_DATA
 
     def close_all_orders(self):
         positions = mt5.positions_get(symbol=self.symbol)
