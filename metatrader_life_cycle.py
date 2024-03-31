@@ -27,8 +27,8 @@ class MetatraderLifeCycle:
     def __init__(self, symbol: str, timeframe=mt5.TIMEFRAME_M15):
         self.symbol = symbol
         self.timeframe = timeframe
-        self.bid = self.get_symbol_info().bid
-        self.ask = self.get_symbol_info().ask
+        self.previous_bid = self.get_symbol_info().bid
+        self.previous_ask = self.get_symbol_info().ask
         self.PLOT_DATA = {
             'signal_data': {}
         }
@@ -46,17 +46,14 @@ class MetatraderLifeCycle:
         return mt5.symbol_info(self.symbol)
 
     def check_ticks(self):
-        tick = self.get_symbol_info()
-        if tick is not None:
-            ask_ = tick.ask
-            bid_ = tick.bid
-            real_volume_ = tick.volume_real
-            volume_ = tick.volume
-            time_ = tick.time
+        symbol_info = self.get_symbol_info()
+        if symbol_info is not None:
+            current_ask_ = symbol_info.ask
+            current_bid_ = symbol_info.bid
 
-            if bid_ != self.bid or ask_ != self.ask:
-                self.bid = bid_
-                self.ask = ask_
+            if current_bid_ != self.previous_bid or current_ask_ != self.previous_ask:
+                self.previous_bid = current_bid_
+                self.previous_ask = current_ask_
                 self.on_manage_risk()
                 print('new tick {} {}'.format(self.symbol, self.timeframe))
                 return self.on_tick()
@@ -79,6 +76,7 @@ class MetatraderLifeCycle:
 
             bars_frame = bars_frame.iloc[:40]
 
+            # calling on signal
             signal_data = self.on_signal()
 
             ask = self.get_symbol_info().ask
@@ -156,7 +154,7 @@ class MetatraderLifeCycle:
             print("Not enough free margin to execute the trade")
             return
 
-        price = self.get_symbol_info().ask if direction == TradeDirection.BUY else self.get_symbol_info().bid
+        price = self.get_symbol_info().previous_ask if direction == TradeDirection.BUY else self.get_symbol_info().previous_bid
 
         request = {
             "action": mt5.TRADE_ACTION_DEAL,

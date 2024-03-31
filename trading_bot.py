@@ -27,17 +27,13 @@ class TradingThread(Thread):
 
 
 if __name__ == '__main__':
-    bot1 = TradingThread("BTCUSD.ecn", mt5.TIMEFRAME_M1)
-    bot5 = TradingThread("BTCUSD.ecn", mt5.TIMEFRAME_M5)
-    bot15 = TradingThread("BTCUSD.ecn", mt5.TIMEFRAME_M15)
-    # bot1.daemon = False
-    # bot5.daemon = False
-    # bot15.daemon = False
+    bots = [TradingThread("BTCUSD.ecn", mt5.TIMEFRAME_M1),
+            TradingThread("EURUSD.ecn", mt5.TIMEFRAME_M1),
+            TradingThread("BTCUSD.ecn", mt5.TIMEFRAME_H1),
+            TradingThread("EURUSD.ecn", mt5.TIMEFRAME_H1), ]
 
-    bot1.start()
-    bot5.start()
-    bot15.start()
-
-    bot1.join()
-    bot5.join()
-    bot15.join()
+    for bot in bots:
+        bot.daemon = True
+        bot.start()
+    for bot in bots:
+        bot.join()
