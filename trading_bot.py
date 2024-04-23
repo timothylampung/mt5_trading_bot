@@ -1,36 +1,155 @@
 import time
 from threading import Thread
-import MetaTrader5 as mt5
+from typing import List
 
-from metatrader_life_cycle import MetatraderLifeCycle
+import MetaTrader5 as mt5
+import pandas as pd
+
+from metatrader_life_cycle import MetatraderLifeCycle, TradeDirection
+from signals.ma_ribbon_signal import MaRibbonSignal
+from signals.signal import Signal
 
 
 class TradingBot(MetatraderLifeCycle):
 
     def on_signal(self):
-        pass
+
+        if self.get_profit_loss_percentage() < -3:
+            print('the account is floating so much, ignoring signals')
+            self.time_delay = 180
+            return
+
+        positions = mt5.positions_get(symbol=self.symbol)
+        if positions is not None and len(positions) > 0:
+            self.time_delay = 180
+        else:
+            self.time_delay = 0.25
+
+        # stop processing if position is greater than 3
+        if len(positions) > 0:
+            return
+
+        positions = mt5.positions_get(symbol=self.symbol)
+
+        for signal in self.signals:
+            entry_bars = mt5.copy_rates_from_pos(self.symbol, signal.get_entry_timeframe(), 0, 200)
+            exit_bars = mt5.copy_rates_from_pos(self.symbol, signal.get_exit_timeframe(), 0, 200)
+            if entry_bars is not None and len(entry_bars) > 0:
+                entry_bars_frame = pd.DataFrame(entry_bars)
+                exit_bars_frame = pd.DataFrame(exit_bars)
+
+                buy = signal.check_buy(entry_bars_frame)
+                sell = signal.check_sell(entry_bars_frame)
+                upper, lower = signal.get_stops(exit_bars_frame)
+
+                if signal.check_profit_take(entry_bars_frame) or signal.check_stop_loss(entry_bars_frame):
+                    return
+
+                if buy[0]:
+                    multiplier = 0
+                    total_profit = 0
+                    for position in positions:
+                        if position.comment == buy[1]:
+                            multiplier = multiplier + 1
+                            total_profit = total_profit + position.profit
+                    volume_ = 0
+                    if multiplier == 0 or total_profit > 0:
+                        volume_ = self.volume
+                    else:
+                        volume_ = self.volume * multiplier
+
+                    if total_profit > 0 and multiplier > 0:
+                        return
+
+                    self.execute_market_order(volume_, TradeDirection.BUY,
+                                              '{}:{}'.format(buy[1], signal.get_entry_timeframe()),
+                                              sl=lower
+                                              )
+                    time.sleep(1)
+                    self.time_delay = 180
+
+                if sell[0]:
+                    multiplier = 0
+                    total_profit = 0
+                    for position in positions:
+                        if position.comment == sell[1]:
+                            multiplier = multiplier + 1
+                            total_profit = total_profit + position.profit
+                    volume_ = 0
+                    if multiplier == 0 or total_profit > 0:
+                        volume_ = self.volume
+                    else:
+                        volume_ = self.volume * multiplier
+
+                    if total_profit > 0 and multiplier > 0:
+                        return
+
+                    self.execute_market_order(volume_, TradeDirection.SELL,
+                                              '{}:{}'.format(sell[1], signal.get_entry_timeframe()),
+                                              sl=upper
+                                              )
+                    self.time_delay = 180
 
     def on_manage_risk(self):
-        pass
+        positions = mt5.positions_get(symbol=self.symbol)
+        # if len(positions) > 0:
+        #     for signal in self.signals:
+        #         bars = mt5.copy_rates_from_pos(self.symbol, signal.get_exit_timeframe(), 0, 80)
+        #         bars_frame = pd.DataFrame(bars)
+        #         if isinstance(signal, Signal):
+        #             if signal.check_profit_take(bars_frame):
+        #                 print('closing reason, profit take')
+        #                 self.close_orders(positions, comment='PT')
+        #             if signal.check_stop_loss(bars_frame):
+        #                 print('closing reason, stop loss')
+        #                 self.close_orders(positions)
+
+            # self.close_orders(signal.check_close_buy(positions, bars))
+            # self.close_orders(signal.check_close_sell(positions, bars))
 
 
 class TradingThread(Thread):
-    def __init__(self, symbol, timeframe):
-        self.trading_bot = TradingBot(symbol, timeframe)
+    def __init__(self, symbol, volume, signal_providers: List[Signal]):
+        self.trading_bot = TradingBot(symbol, volume)
+        print('{} {} {}'.format(symbol, volume, signal_providers))
+        for signal_provider in signal_providers:
+            self.trading_bot.add_signal_provider(signal_provider)
         super().__init__()
+
+    def add_signal_provider(self, signal: Signal):
+        self.trading_bot.add_signal_provider(signal)
 
     def run(self) -> None:
         self.trading_bot.subscribe_to_tick()
         while True:
             self.trading_bot.check_ticks()
-            time.sleep(.25)
+            time.sleep(0.1)
 
 
 if __name__ == '__main__':
-    bots = [TradingThread("BTCUSD.ecn", mt5.TIMEFRAME_M1),
-            TradingThread("EURUSD.ecn", mt5.TIMEFRAME_M1),
-            TradingThread("BTCUSD.ecn", mt5.TIMEFRAME_H1),
-            TradingThread("EURUSD.ecn", mt5.TIMEFRAME_H1), ]
+
+    # get symbols containing RU in their names
+    ru_symbols = mt5.symbols_get(group="*USD.ecn*,!*ETH*,*JPY.ecn*,*AUD.ecn*")
+
+    # List of symbols representing cryptocurrencies to be excluded
+    crypto_symbols = ['BTC', 'ETH', 'XRP', 'LTC', 'BCH', 'ADA', 'XLM', 'BNB', 'EOS', 'XMR', 'TRX', 'DOT', 'USDT',
+                      'DOGE', 'LINK', 'KSM', 'UNI', 'SOL', 'MAT', 'LNK', 'DOG', 'AVX', 'XNG', 'SEK', 'XPT', 'XPD',
+                      'XAG', 'SGD', 'NOK',
+                      'XLM']
+    filtered_symbols = [s for s in ru_symbols if all(crypto not in s.name for crypto in crypto_symbols)]
+
+    bots = [
+    ]
+
+    signals = [
+        MaRibbonSignal(mt5.TIMEFRAME_M5, mt5.TIMEFRAME_M1),
+        MaRibbonSignal(mt5.TIMEFRAME_M15, mt5.TIMEFRAME_M5),
+        MaRibbonSignal(mt5.TIMEFRAME_H1, mt5.TIMEFRAME_M15),
+    ]
+
+    for s in filtered_symbols:
+        for signal in signals:
+            bots.append(TradingThread(s.name, 0.01, [signal]))
 
     for bot in bots:
         bot.daemon = True
