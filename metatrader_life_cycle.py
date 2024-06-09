@@ -1,17 +1,14 @@
 import asyncio
 from enum import Enum
 from typing import List
-
+import joblib
 import pandas as pd
 import MetaTrader5 as mt5
 import random
 from datetime import datetime, timedelta
-
-from signals.bbma_signal import BBMASignal
-from signals.ma_ribbon_signal import MaRibbonSignal
-from signals.rsi_oversold_overbought_signal import RSIOversoldOverboughtSignal
 from signals.signal import Signal
-from telegram_bot import send_message
+from darts import TimeSeries
+from darts.models import NBEATSModel
 
 
 def initialize_mt5():
@@ -42,6 +39,42 @@ class MetatraderLifeCycle:
         self.signal_start_time = datetime.now()
         self.volume = volume
         self.signals = []
+        model_file = 'machine_learning/model.joblib'
+        self.model = joblib.load(model_file)
+
+    def predict_signal(self):
+        historical_data = mt5.copy_rates_from_pos(self.symbol, mt5.TIMEFRAME_H1, 0, 28)
+
+        data = pd.DataFrame(historical_data)
+        data['time'] = pd.to_datetime(data['time'], unit='s')
+        data.set_index('time', inplace=True)
+        # Generate a complete date range and reindex the DataFrame to it
+        date_range = pd.date_range(start=data.index.min(), end=data.index.max(), freq='1h')
+        data = data.reindex(date_range,
+                            method='pad')  # Fill missing values by propagating the last valid observation forward
+        series = TimeSeries.from_times_and_values(data.index, data['close'])
+        # Load the saved model
+        loaded_model = NBEATSModel.load("nbeats_model.pth")
+
+        # Make predictions with the loaded model
+        forecast = loaded_model.predict(n=3, series=series, num_loader_workers=5)
+
+        # Print or return the forecast
+        prediction = forecast.last_value()
+        symbol_info = self.get_symbol_info()
+        self.on_manage_risk()
+        if symbol_info is not None:
+            current_ask_ = symbol_info.ask
+            current_bid_ = symbol_info.bid
+
+            if current_bid_ < prediction and current_ask_ < prediction:
+                return 1, forecast.values()
+            elif current_bid_ > prediction and current_ask_ > prediction:
+                return -1, forecast.values()
+            else:
+                return 0, forecast.values()
+
+        return 0, [0, 0, 0]
 
     def add_signal_provider(self, signal: Signal):
         self.signals.append(signal)
@@ -104,7 +137,8 @@ class MetatraderLifeCycle:
                 ticket = position.ticket
                 mt5.Close(self.symbol, ticket=ticket)
         if total_profit_loss != 0:
-            send_message('close {} -> {} USD'.format(self.symbol, round(total_profit_loss, 2)))
+            pass
+            # send_message('close {} -> {} USD'.format(self.symbol, round(total_profit_loss, 2)))
 
     def close_orders(self, positions: List[mt5.TradePosition], comment=None):
         total_profit_loss = 0
@@ -115,9 +149,11 @@ class MetatraderLifeCycle:
                 ticket = position.ticket
                 mt5.Close(self.symbol, ticket=ticket, comment='{}:{}'.format(position.comment, comment))
         if total_profit_loss != 0:
-            send_message('close {} -> {} USD'.format(self.symbol, round(total_profit_loss, 2)))
+            pass
+            # send_message('close {} -> {} USD'.format(self.symbol, round(total_profit_loss, 2)))
 
-    def execute_market_order(self, volume: float, direction: TradeDirection, comment: str, sl: float = None):
+    def execute_market_order(self, volume: float, direction: TradeDirection, comment: str, sl: float = None,
+                             price=None, tp=None):
         symbol_info = self.get_symbol_info()
         if symbol_info is None:
             print("not found, can not call order_check()")
@@ -138,10 +174,30 @@ class MetatraderLifeCycle:
 
         symbol_info = self.get_symbol_info()
         point = symbol_info.point
-        price = symbol_info.ask if direction == TradeDirection.BUY else symbol_info.bid
+
+        deal_action = mt5.TRADE_ACTION_DEAL
+
+        if price is None:
+            price = self.get_symbol_info().ask if direction == TradeDirection.BUY else self.get_symbol_info().ask
+            deal_action = mt5.TRADE_ACTION_DEAL
+
+        else:
+            deal_action = mt5.TRADE_ACTION_PENDING
+
+            if order_type == mt5.ORDER_TYPE_BUY:
+                if price > symbol_info.ask and price > symbol_info.ask:
+                    order_type = mt5.ORDER_TYPE_BUY_STOP
+                if price < symbol_info.ask and price < symbol_info.ask:
+                    order_type = mt5.ORDER_TYPE_BUY_LIMIT
+            if order_type == mt5.ORDER_TYPE_SELL:
+                if price > symbol_info.ask and price > symbol_info.ask:
+                    order_type = mt5.ORDER_TYPE_SELL_LIMIT
+                if price < symbol_info.ask and price < symbol_info.ask:
+                    order_type = mt5.ORDER_TYPE_SELL_STOP
+
         deviation = 20
 
-        margin_required = mt5.order_calc_margin(mt5.TRADE_ACTION_DEAL, self.symbol, volume, price)
+        margin_required = mt5.order_calc_margin(deal_action, self.symbol, volume, price)
         if margin_required is None:
             print("Failed to calculate margin")
             disconnect_mt5()
@@ -150,10 +206,8 @@ class MetatraderLifeCycle:
             print("Not enough free margin to execute the trade")
             return
 
-        price = self.get_symbol_info().ask if direction == TradeDirection.BUY else self.get_symbol_info().ask
-
         request = {
-            "action": mt5.TRADE_ACTION_DEAL,
+            "action": deal_action,
             "symbol": self.symbol,
             "volume": volume,
             "type": order_type,
@@ -164,16 +218,22 @@ class MetatraderLifeCycle:
             "type_time": mt5.ORDER_TIME_GTC
         }
 
-        if sl is not None:
-            request['sl'] = sl
-
+        expire = datetime.now() + timedelta(hours=3)
+        expire_time = int(expire.timestamp())
+        request['tp'] = tp
+        request['expiration'] = expire_time
+        if tp is not None:
             if direction == TradeDirection.BUY:
-                tp = price + 2 * (price - sl)
-                request['tp'] = tp
+                # tp = price + 2 * (price - sl)
+                sl = price - (0.7 * (price - tp))
+                # request['tp'] = tp
 
-            else:
-                tp = price - 2 * (sl - price)
-                request['tp'] = tp
+            elif direction == TradeDirection.SELL:
+                sl = price + (0.7 * (price - tp))
+                # tp = price - 2 * (sl - price)
+                # request['tp'] = tp
+
+            request['sl'] = sl
 
         initialize_mt5()
         try:
@@ -188,7 +248,8 @@ class MetatraderLifeCycle:
                 # print("order was not sent {}".format(result))
             else:
                 print("order was sent successfully")
-                send_message('new order {} {}'.format(self.symbol, request))
+                pass
+                # send_message('new order {} {}'.format(self.symbol, request))
 
         except Exception as e:
             print(e)

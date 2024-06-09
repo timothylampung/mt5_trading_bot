@@ -3,6 +3,7 @@ from threading import Thread
 from typing import List
 
 import MetaTrader5 as mt5
+import numpy as np
 import pandas as pd
 
 from metatrader_life_cycle import MetatraderLifeCycle, TradeDirection
@@ -26,26 +27,32 @@ class TradingBot(MetatraderLifeCycle):
             self.time_delay = 0.25
 
         # stop processing if position is greater than 3
-        if len(positions) > 0:
+        if len(positions) > 2:
             return
 
         positions = mt5.positions_get(symbol=self.symbol)
+        orders = mt5.orders_get(symbol=self.symbol)
 
-        for signal in self.signals:
-            entry_bars = mt5.copy_rates_from_pos(self.symbol, signal.get_entry_timeframe(), 0, 200)
-            exit_bars = mt5.copy_rates_from_pos(self.symbol, signal.get_exit_timeframe(), 0, 200)
+        for ss in self.signals:
+            entry_bars = mt5.copy_rates_from_pos(self.symbol, ss.get_entry_timeframe(), 0, 200)
+            exit_bars = mt5.copy_rates_from_pos(self.symbol, ss.get_exit_timeframe(), 0, 200)
+
+            action, prices = self.predict_signal()
+            maximum = prices.max()
+            lowest = prices.min()
+            print('PROFITABILITY {} {} {} {}'.format(action, prices, maximum, lowest))
+
             if entry_bars is not None and len(entry_bars) > 0:
                 entry_bars_frame = pd.DataFrame(entry_bars)
                 exit_bars_frame = pd.DataFrame(exit_bars)
 
-                buy = signal.check_buy(entry_bars_frame)
-                sell = signal.check_sell(entry_bars_frame)
-                upper, lower = signal.get_stops(exit_bars_frame)
-
-                if signal.check_profit_take(entry_bars_frame) or signal.check_stop_loss(entry_bars_frame):
+                buy = ss.check_buy(entry_bars_frame)
+                sell = ss.check_sell(entry_bars_frame)
+                upper, lower = ss.get_stops(exit_bars_frame)
+                if ss.check_profit_take(entry_bars_frame) or ss.check_stop_loss(entry_bars_frame):
                     return
+                if action == 1 and buy:
 
-                if buy[0]:
                     multiplier = 0
                     total_profit = 0
                     for position in positions:
@@ -62,13 +69,13 @@ class TradingBot(MetatraderLifeCycle):
                         return
 
                     self.execute_market_order(volume_, TradeDirection.BUY,
-                                              '{}:{}'.format(buy[1], signal.get_entry_timeframe()),
-                                              sl=lower
+                                              '{}:{}'.format(buy[1], ss.get_entry_timeframe()),
+                                              sl=lower, price=lowest, tp=maximum
                                               )
                     time.sleep(1)
                     self.time_delay = 180
 
-                if sell[0]:
+                if action == -1 and sell:
                     multiplier = 0
                     total_profit = 0
                     for position in positions:
@@ -85,8 +92,8 @@ class TradingBot(MetatraderLifeCycle):
                         return
 
                     self.execute_market_order(volume_, TradeDirection.SELL,
-                                              '{}:{}'.format(sell[1], signal.get_entry_timeframe()),
-                                              sl=upper
+                                              '{}:{}'.format(sell[1], ss.get_entry_timeframe()),
+                                              sl=upper, price=maximum, tp=lowest
                                               )
                     self.time_delay = 180
 
@@ -104,8 +111,8 @@ class TradingBot(MetatraderLifeCycle):
         #                 print('closing reason, stop loss')
         #                 self.close_orders(positions)
 
-            # self.close_orders(signal.check_close_buy(positions, bars))
-            # self.close_orders(signal.check_close_sell(positions, bars))
+        # self.close_orders(signal.check_close_buy(positions, bars))
+        # self.close_orders(signal.check_close_sell(positions, bars))
 
 
 class TradingThread(Thread):
@@ -123,7 +130,7 @@ class TradingThread(Thread):
         self.trading_bot.subscribe_to_tick()
         while True:
             self.trading_bot.check_ticks()
-            time.sleep(0.1)
+            time.sleep(1)
 
 
 if __name__ == '__main__':
@@ -142,14 +149,11 @@ if __name__ == '__main__':
     ]
 
     signals = [
-        MaRibbonSignal(mt5.TIMEFRAME_M5, mt5.TIMEFRAME_M1),
-        MaRibbonSignal(mt5.TIMEFRAME_M15, mt5.TIMEFRAME_M5),
-        MaRibbonSignal(mt5.TIMEFRAME_H1, mt5.TIMEFRAME_M15),
+        MaRibbonSignal(mt5.TIMEFRAME_M15, mt5.TIMEFRAME_M1),
     ]
 
-    for s in filtered_symbols:
-        for signal in signals:
-            bots.append(TradingThread(s.name, 0.01, [signal]))
+    for signal in signals:
+        bots.append(TradingThread('XAUUSD.ecn', 1.0, [signal]))
 
     for bot in bots:
         bot.daemon = True
